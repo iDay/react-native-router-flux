@@ -1,157 +1,107 @@
-/**
- * Copyright (c) 2015-present, Pavel Aksonov
- * All rights reserved.
- *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree.
- *
- */
-import React, {
-  Component,
-  PropTypes,
-} from 'react';
-import { BackAndroid } from 'react-native';
-import NavigationExperimental from 'react-native-experimental-navigation';
+import React from 'react';
+import { observer } from 'mobx-react/native';
+import { ViewPropTypes, BackHandler, Linking } from 'react-native';
+import PropTypes from 'prop-types';
+import { addNavigationHelpers } from 'react-navigation';
+import navigationStore from './navigationStore';
+import pathParser from './pathParser';
 
-import Actions, { ActionMap } from './Actions';
-import getInitialState from './State';
-import Reducer, { findElement } from './Reducer';
-import DefaultRenderer from './DefaultRenderer';
-import Scene from './Scene';
-import * as ActionConst from './ActionConst';
-
-const {
-  RootContainer: NavigationRootContainer,
-} = NavigationExperimental;
-
-const propTypes = {
-  dispatch: PropTypes.func,
-  backAndroidHandler: PropTypes.func,
-  onBackAndroid: PropTypes.func,
-  onExitApp: PropTypes.func,
-};
-
-class Router extends Component {
-
-  constructor(props) {
-    super(props);
-    this.state = {};
-    this.renderNavigation = this.renderNavigation.bind(this);
-    this.handleProps = this.handleProps.bind(this);
-    this.handleBackAndroid = this.handleBackAndroid.bind(this);
-  }
+@observer
+class App extends React.Component {
+  static propTypes = {
+    navigator: PropTypes.func,
+    backAndroidHandler: PropTypes.func,
+    uriPrefix: PropTypes.string,
+    onDeepLink: PropTypes.func,
+  };
 
   componentDidMount() {
-    this.handleProps(this.props);
+    BackHandler.addEventListener('hardwareBackPress', this.props.backAndroidHandler || this.onBackPress);
 
-    BackAndroid.addEventListener('hardwareBackPress', this.handleBackAndroid);
-  }
-
-  componentWillReceiveProps(props) {
-    this.handleProps(props);
+    // If the app was "woken up" by an external route.
+    Linking.getInitialURL().then((url) => this.parseDeepURL(url));
+    // Add an event listener for further deep linking.
+    Linking.addEventListener('url', this.handleDeepURL);
   }
 
   componentWillUnmount() {
-    BackAndroid.removeEventListener('hardwareBackPress', this.handleBackAndroid);
+    BackHandler.removeEventListener('hardwareBackPress', this.props.backAndroidHandler || this.onBackPress);
+    Linking.removeEventListener('url', this.handleDeepURL);
   }
 
-  handleBackAndroid() {
-    const {
-      backAndroidHandler,
-      onBackAndroid,
-      onExitApp,
-    } = this.props;
-    // optional for customizing handler
-    if (backAndroidHandler) {
-      return backAndroidHandler();
+  onBackPress = () => navigationStore.pop();
+
+  handleDeepURL = (e) => this.parseDeepURL(e.url);
+
+  parseDeepURL = (url) => {
+    // If there is no url, then return.
+    if (!url) { return; }
+
+    // Clean the url with the given prefix.
+    const cleanUrl = this.props.uriPrefix ? url.split(this.props.uriPrefix)[1] : url;
+    // Build an array of paths for every scene.
+    const allPaths = Object.values(navigationStore.states).map(obj => obj.path).filter(path => path);
+    // Try to match the url against the set of paths and parse the url parameters.
+    const parsedPath = pathParser(cleanUrl, allPaths);
+
+    // If the url could not be matched, then return.
+    if (!parsedPath) { return; }
+
+    // Destructure the matched path and the parsed url parameters.
+    const { path, params } = parsedPath;
+
+    // Get the action from the scene associated with the matched path.
+    const actionKey = Object.entries(navigationStore.states)
+      .filter(([, value]) => value.path === path)
+      .map(([key]) => key)
+      .find(key => key);
+
+    if (this.props.onDeepLink) {
+      this.props.onDeepLink({ url, action: actionKey, params });
+    } else if (actionKey && navigationStore[actionKey]) {
+      // Call the action associated with the scene's path with the parsed parameters.
+      navigationStore[actionKey](params);
     }
-
-    try {
-      Actions.pop();
-      if (onBackAndroid) {
-        onBackAndroid();
-      }
-      return true;
-    } catch (err) {
-      if (onExitApp) {
-        return onExitApp();
-      }
-
-      return false;
-    }
-  }
-
-  handleProps(props) {
-    let scenesMap;
-
-    if (props.scenes) {
-      scenesMap = props.scenes;
-    } else {
-      let scenes = props.children;
-
-      if (Array.isArray(props.children) || props.children.props.component) {
-        scenes = (
-          <Scene
-            key="__root"
-            hideNav
-            {...this.props}
-          >
-            {props.children}
-          </Scene>
-        );
-      }
-      scenesMap = Actions.create(scenes, props.wrapBy);
-    }
-
-    // eslint-disable-next-line no-unused-vars
-    const { children, styles, scenes, reducer, createReducer, ...parentProps } = props;
-
-    scenesMap.rootProps = parentProps;
-
-    const initialState = getInitialState(scenesMap);
-    const reducerCreator = props.createReducer || Reducer;
-
-    const routerReducer = props.reducer || (
-      reducerCreator({
-        initialState,
-        scenes: scenesMap,
-      }));
-
-    this.setState({ reducer: routerReducer });
-  }
-
-  renderNavigation(navigationState, onNavigate) {
-    if (!navigationState) {
-      return null;
-    }
-    Actions.get = key => findElement(navigationState, key, ActionConst.REFRESH);
-    Actions.callback = props => {
-      const constAction = (props.type && ActionMap[props.type] ? ActionMap[props.type] : null);
-      if (this.props.dispatch) {
-        if (constAction) {
-          this.props.dispatch({ ...props, type: constAction });
-        } else {
-          this.props.dispatch(props);
-        }
-      }
-      return (constAction ? onNavigate({ ...props, type: constAction }) : onNavigate(props));
-    };
-
-    return <DefaultRenderer onNavigate={onNavigate} navigationState={navigationState} />;
-  }
+  };
 
   render() {
-    if (!this.state.reducer) return null;
-
+    const AppNavigator = this.props.navigator;
     return (
-      <NavigationRootContainer
-        reducer={this.state.reducer}
-        renderNavigation={this.renderNavigation}
-      />
+      <AppNavigator navigation={addNavigationHelpers({ dispatch: navigationStore.dispatch, state: navigationStore.state })} />
     );
   }
 }
 
-Router.propTypes = propTypes;
+const Router = ({ createReducer, sceneStyle, scenes, uriPrefix, navigator, getSceneStyle, children, state, dispatch, onDeepLink, wrapBy = props => props, ...props }) => {
+  const data = { ...props };
+  if (getSceneStyle) {
+    data.cardStyle = getSceneStyle(props);
+  }
+  if (sceneStyle) {
+    data.cardStyle = sceneStyle;
+  }
+  const AppNavigator = scenes || navigator || navigationStore.create(children, data, wrapBy);
+  navigationStore.reducer = createReducer && createReducer(props);
+  if (dispatch && state) {
+    // set external state and dispatch
+    navigationStore.setState(state);
+    navigationStore.dispatch = dispatch;
+    return <AppNavigator navigation={addNavigationHelpers({ dispatch, state })} uriPrefix={uriPrefix} />;
+  }
+  return <App {...props} onDeepLink={onDeepLink} navigator={AppNavigator} uriPrefix={uriPrefix} />;
+};
+Router.propTypes = {
+  createReducer: PropTypes.func,
+  dispatch: PropTypes.func,
+  state: PropTypes.object,
+  scenes: PropTypes.func,
+  navigator: PropTypes.func,
+  wrapBy: PropTypes.func,
+  getSceneStyle: PropTypes.func,
+  sceneStyle: ViewPropTypes.style,
+  children: PropTypes.element,
+  uriPrefix: PropTypes.string,
+  onDeepLink: PropTypes.func,
+};
 
 export default Router;
